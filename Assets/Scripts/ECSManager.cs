@@ -16,6 +16,7 @@ public class ECSManager : MonoBehaviour
     public float cohesionWeight;
     public float alignmentWeight;
     public float avoidWallsWeight;
+    public float avoidObstaclesWeight;
     public float avoidWallsTurnDist;
 
     [SerializeField]

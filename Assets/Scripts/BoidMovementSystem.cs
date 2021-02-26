@@ -3,6 +3,7 @@ using Unity.Entities;
 using Unity.Jobs;
 using Unity.Mathematics;
 using Unity.Transforms;
+using UnityEngine;
 
 public class BoidMovementSystem : JobComponentSystem
 {
@@ -28,6 +29,9 @@ public class BoidMovementSystem : JobComponentSystem
 
             NativeArray<EntityWithLocalToWorld> boidArray = new NativeArray<EntityWithLocalToWorld>(entityArray.Length, Allocator.TempJob);
             NativeArray<float4x4> newBoidTransforms = new NativeArray<float4x4>(entityArray.Length, Allocator.TempJob);
+            NativeArray<RaycastHit> results = new NativeArray<RaycastHit>(entityArray.Length, Allocator.TempJob);
+            NativeArray<RaycastCommand> raycastCommand = new NativeArray<RaycastCommand>(entityArray.Length, Allocator.TempJob);
+            NativeArray<bool> hits = new NativeArray<bool>(entityArray.Length, Allocator.TempJob);
 
             for (int i = 0; i < entityArray.Length; i++)
             {
@@ -48,16 +52,41 @@ public class BoidMovementSystem : JobComponentSystem
             float cohesionWeight = controller.cohesionWeight;
             float alignmentWeight = controller.alignmentWeight;
             float avoidWallsWeight = controller.avoidWallsWeight;
-            float avoidWallsTurnDist = controller.avoidWallsTurnDist;
+            float avoidObstaclesWeight = controller.avoidObstaclesWeight;
+            float avoidWallsTurnDist = controller.avoidWallsTurnDist;            
 
             float deltaTime = Time.DeltaTime;
 
+            JobHandle raycastJobHandle = Entities
+                .WithAll<BoidData>()
+                .WithBurst(Unity.Burst.FloatMode.Fast, Unity.Burst.FloatPrecision.Medium)
+                .ForEach((int entityInQueryIndex, in LocalToWorld localToWorld) =>
+                {
+                    float3 origin = localToWorld.Position;
+                    float3 direction = localToWorld.Forward;
+                    raycastCommand[entityInQueryIndex] = new RaycastCommand(origin, direction, 20f);
+                }).Schedule(inputDeps);
+
+            JobHandle handle = RaycastCommand.ScheduleBatch(raycastCommand, results, results.Length, raycastJobHandle);
+            handle.Complete();
+
+            raycastCommand.Dispose();
+
+            for (int i = 0; i < newBoidTransforms.Length; i++)
+            {
+                if (results[i].collider == null)
+                    hits[i] = false;
+                else
+                    hits[i] = true;
+            }
+
             JobHandle boidJobHandle = Entities
                 .WithAll<BoidData>()
-                .WithBurst()
                 .WithReadOnly(boidArray)
                 .WithDisposeOnCompletion(boidArray)
-                .ForEach((Entity boid, int entityInQueryIndex, ref LocalToWorld localToWorld) =>
+                .WithDisposeOnCompletion(results)
+                .WithDisposeOnCompletion(hits)
+                .ForEach((Entity boid, int entityInQueryIndex, in LocalToWorld localToWorld) =>
                 {
                     float3 boidPosition = localToWorld.Position;
                     float3 separationSum = float3.zero;
@@ -106,6 +135,11 @@ public class BoidMovementSystem : JobComponentSystem
                         force += -math.normalize(boidPosition) * avoidWallsWeight;
                     }
 
+                    if (hits[entityInQueryIndex])
+                    {
+                        force = math.reflect(localToWorld.Forward, results[entityInQueryIndex].normal) * avoidObstaclesWeight;
+                    }
+
                     float3 velocity = localToWorld.Forward * boidSpeed;
                     velocity += force * deltaTime;
                     velocity = math.normalize(velocity) * boidSpeed;
@@ -115,17 +149,16 @@ public class BoidMovementSystem : JobComponentSystem
                         quaternion.LookRotationSafe(velocity, localToWorld.Up),
                         new float3(1f, 1f, 1f)
                         );
-                }).Schedule(inputDeps);
+                }).Schedule(raycastJobHandle);            
 
             JobHandle boidMoveJob = Entities
                 .WithAll<BoidData>()
-                .WithBurst()
                 .WithReadOnly(newBoidTransforms)
                 .WithDisposeOnCompletion(newBoidTransforms)
-                .ForEach((Entity boid, int entityInQueryIndex, ref LocalToWorld localToWorld) =>
+                .ForEach((int entityInQueryIndex, ref LocalToWorld localToWorld) =>
                 {
                     localToWorld.Value = newBoidTransforms[entityInQueryIndex];
-                }).Schedule(boidJobHandle);
+                }).Schedule(boidJobHandle);            
 
             return boidMoveJob;
         }
